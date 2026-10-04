@@ -20,7 +20,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#13211f;color:#d9e8e4;
 <div class="wrap">
  <div class="card">
   <h1>🖨️ POS Printer Bridge</h1>
-  <div class="sub">v3.7.3 • Direct Job Handoff • CY-BX58D-CBCF • CP874</div>
+  <div class="sub">v3.7.4 • Auto Print • CY-BX58D-CBCF • CP874</div>
   <div id="support" class="status">กำลังตรวจสอบ...</div>
   <div id="printerStatus" class="status">กำลังตรวจเครื่องพิมพ์...</div>
   <div id="jobStatus" class="status">ยังไม่มีงานพิมพ์</div>
@@ -30,6 +30,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#13211f;color:#d9e8e4;
   <div class="grid">
    <button id="connect" class="primary">เชื่อม / เปลี่ยนเครื่อง</button>
    <button id="test" class="secondary" disabled>ทดสอบพิมพ์</button>
+   <button id="retry" class="secondary" style="display:none;grid-column:1/-1">พิมพ์งานที่รออีกครั้ง</button>
   </div>
   <div class="sub" style="margin-top:8px">ครั้งแรกเลือก CY-BX58D-CBCF หลังจากนั้น Bridge จะพยายามเชื่อมเครื่องเดิมอัตโนมัติ</div>
  </div>
@@ -46,6 +47,9 @@ const BOLD_ON=bytes(0x1b,0x45,1),BOLD_OFF=bytes(0x1b,0x45,0),FEED3=bytes(0x1b,0x
 function log(s){$('#log').textContent+=`[${new Date().toLocaleTimeString('th-TH')}] ${s}\n`}
 function pstate(ok,text){const e=$('#printerStatus');e.textContent=text||(ok?`พร้อมพิมพ์: ${device?.name||'Bluetooth Printer'}`:'ยังไม่ได้เชื่อมเครื่องพิมพ์');e.className='status '+(ok?'good':'bad');$('#test').disabled=!ok}
 function jstate(text,kind=''){const e=$('#jobStatus');e.textContent=text;e.className='status '+kind}
+function setJobMode(on){
+ document.body.setAttribute('data-job-mode',on?'1':'0');
+}
 $('#support').innerHTML=`Secure Context: <b>${window.isSecureContext?'YES':'NO'}</b> • Web Bluetooth: <b>${navigator.bluetooth?'YES':'NO'}</b>`;
 $('#support').className='status '+(window.isSecureContext&&navigator.bluetooth?'good':'bad');
 log(`Secure=${window.isSecureContext}, Bluetooth=${!!navigator.bluetooth}`);
@@ -122,25 +126,47 @@ $('#test').onclick=async()=>{try{await sendParts([INIT,CENTER,BOLD_ON,encodeCP87
 
 async function tryPendingPrint(){
  if(printing||!pendingJob)return;
- if(!writer){jstate('มีงานรอพิมพ์ • กรุณาเชื่อมเครื่องพิมพ์','wait');return}
+ if(!writer){
+  jstate('มีงานรอพิมพ์ • กำลังรอเครื่องพิมพ์','wait');
+  $('#retry').style.display='block';
+  return;
+ }
  printing=true;
+ $('#retry').style.display='none';
  try{
-  jstate('กำลังพิมพ์...','wait');await printReceipt(pendingJob.receipt||{},pendingJob.receiptConfig||{});
+  jstate('กำลังพิมพ์อัตโนมัติ...','wait');await printReceipt(pendingJob.receipt||{},pendingJob.receiptConfig||{});
   log(`PRINT OK: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);jstate('พิมพ์สำเร็จ','good');
   pendingJob=null;
   history.replaceState(null,'',location.pathname+location.search);
   setTimeout(()=>{try{window.close()}catch(_){}},900);
- }catch(e){log('PRINT ERROR: '+(e.message||e));jstate('พิมพ์ไม่สำเร็จ: '+(e.message||e),'bad')}
+ }catch(e){
+  log('PRINT ERROR: '+(e.message||e));
+  jstate('พิมพ์ไม่สำเร็จ: '+(e.message||e),'bad');
+  $('#retry').style.display='block';
+ }
  finally{printing=false}
 }
+$('#retry').onclick=function(){tryPendingPrint();};
 async function boot(){
  pendingJob=decodeJob();
- if(pendingJob){jstate('รับงานจาก POS แล้ว • กำลังเชื่อมเครื่องพิมพ์','wait');log(`JOB RECEIVED: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`)}
+ setJobMode(!!pendingJob);
+ if(pendingJob){
+  jstate('รับงานจาก POS แล้ว • กำลังพิมพ์อัตโนมัติ','wait');
+  log(`JOB RECEIVED: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);
+ }
  const ok=await autoReconnect();
  if(!ok)pstate(false,'ยังไม่ได้เชื่อมเครื่องพิมพ์');
  await tryPendingPrint();
 }
-window.addEventListener('hashchange',()=>{pendingJob=decodeJob();if(pendingJob){log(`JOB RECEIVED: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);tryPendingPrint()}});
+window.addEventListener('hashchange',()=>{
+ pendingJob=decodeJob();
+ setJobMode(!!pendingJob);
+ if(pendingJob){
+  log(`JOB RECEIVED: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);
+  jstate('รับงานจาก POS แล้ว • กำลังพิมพ์อัตโนมัติ','wait');
+  tryPendingPrint();
+ }
+});
 boot();
 </script>
 </body>
