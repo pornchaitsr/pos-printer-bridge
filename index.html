@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>POS Printer Bridge v3.7.3</title>
+<style>
+:root{font-family:"Noto Sans Thai",system-ui,sans-serif;color:#17332e}
+*{box-sizing:border-box}body{margin:0;background:#f2f6f4}.wrap{max-width:680px;margin:auto;padding:16px}
+.card{background:#fff;border:1px solid #d9e5e1;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 5px 18px #0000000a}
+h1{font-size:21px;margin:0 0 4px}.sub{font-size:13px;color:#687872}.status{padding:11px;border-radius:12px;background:#f1f4f3;margin-top:10px;font-size:14px}
+.good{background:#e6f7ee;color:#0f6538}.bad{background:#fff0ec;color:#9b2c1d}.wait{background:#fff6df;color:#7a5600}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
+button{border:0;border-radius:12px;padding:13px 10px;font-weight:800;font-size:14px}.primary{background:#075e54;color:#fff}.secondary{background:#e5f2ee;color:#075e54}button:disabled{opacity:.45}
+pre{white-space:pre-wrap;word-break:break-word;background:#13211f;color:#d9e8e4;padding:12px;border-radius:12px;min-height:110px;font-size:11px}
+@media(max-width:430px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <div class="card">
+  <h1>🖨️ POS Printer Bridge</h1>
+  <div class="sub">v3.7.3 • Direct Job Handoff • CY-BX58D-CBCF • CP874</div>
+  <div id="support" class="status">กำลังตรวจสอบ...</div>
+  <div id="printerStatus" class="status">กำลังตรวจเครื่องพิมพ์...</div>
+  <div id="jobStatus" class="status">ยังไม่มีงานพิมพ์</div>
+ </div>
+ <div class="card">
+  <b>เครื่องพิมพ์</b>
+  <div class="grid">
+   <button id="connect" class="primary">เชื่อม / เปลี่ยนเครื่อง</button>
+   <button id="test" class="secondary" disabled>ทดสอบพิมพ์</button>
+  </div>
+  <div class="sub" style="margin-top:8px">ครั้งแรกเลือก CY-BX58D-CBCF หลังจากนั้น Bridge จะพยายามเชื่อมเครื่องเดิมอัตโนมัติ</div>
+ </div>
+ <div class="card">
+  <b>Log</b><pre id="log"></pre>
+ </div>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+let device=null,server=null,writer=null,pendingJob=null,printing=false;
+const bytes=(...a)=>new Uint8Array(a.flat());
+const INIT=bytes(0x1b,0x40),CENTER=bytes(0x1b,0x61,1),LEFT=bytes(0x1b,0x61,0);
+const BOLD_ON=bytes(0x1b,0x45,1),BOLD_OFF=bytes(0x1b,0x45,0),FEED3=bytes(0x1b,0x64,3);
+function log(s){$('#log').textContent+=`[${new Date().toLocaleTimeString('th-TH')}] ${s}\n`}
+function pstate(ok,text){const e=$('#printerStatus');e.textContent=text||(ok?`พร้อมพิมพ์: ${device?.name||'Bluetooth Printer'}`:'ยังไม่ได้เชื่อมเครื่องพิมพ์');e.className='status '+(ok?'good':'bad');$('#test').disabled=!ok}
+function jstate(text,kind=''){const e=$('#jobStatus');e.textContent=text;e.className='status '+kind}
+$('#support').innerHTML=`Secure Context: <b>${window.isSecureContext?'YES':'NO'}</b> • Web Bluetooth: <b>${navigator.bluetooth?'YES':'NO'}</b>`;
+$('#support').className='status '+(window.isSecureContext&&navigator.bluetooth?'good':'bad');
+log(`Secure=${window.isSecureContext}, Bluetooth=${!!navigator.bluetooth}`);
+
+function decodeJob(){
+ const m=location.hash.match(/(?:^#|&)job=([^&]+)/);
+ if(!m)return null;
+ try{
+  let b64=m[1].replace(/-/g,'+').replace(/_/g,'/');
+  while(b64.length%4)b64+='=';
+  const bin=atob(b64),arr=Uint8Array.from(bin,c=>c.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(arr));
+ }catch(e){log('JOB DECODE ERROR: '+(e.message||e));return null}
+}
+async function findWritableCharacteristic(srv){
+ const services=await srv.getPrimaryServices();
+ for(const svc of services){for(const ch of await svc.getCharacteristics()){if(ch.properties.writeWithoutResponse||ch.properties.write)return ch}}
+ throw new Error('ไม่พบ GATT characteristic ที่เขียนได้');
+}
+async function attachDevice(d){
+ device=d;
+ device.addEventListener('gattserverdisconnected',()=>{writer=null;server=null;pstate(false,'เครื่องพิมพ์หลุดการเชื่อมต่อ');log('Bluetooth disconnected')});
+ server=await device.gatt.connect(); writer=await findWritableCharacteristic(server);
+ pstate(true);log(`Connected: ${device.name||'(no name)'} / ${writer.uuid}`);
+ await tryPendingPrint();
+}
+async function choosePrinter(){
+ const d=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[
+ '0000ffe0-0000-1000-8000-00805f9b34fb','0000ff00-0000-1000-8000-00805f9b34fb','000018f0-0000-1000-8000-00805f9b34fb']});
+ await attachDevice(d);
+}
+async function autoReconnect(){
+ if(!navigator.bluetooth?.getDevices)return false;
+ try{
+  const ds=await navigator.bluetooth.getDevices(),d=ds.find(x=>x.name==='CY-BX58D-CBCF')||ds[0];
+  if(!d)return false;
+  log(`Auto reconnect: ${d.name||'(no name)'}`);await attachDevice(d);return true;
+ }catch(e){log('Auto reconnect ERROR: '+(e.message||e));return false}
+}
+$('#connect').onclick=async()=>{try{await choosePrinter()}catch(e){pstate(false);log('CONNECT ERROR: '+(e.message||e));alert(e.message||e)}};
+
+async function writeChunk(data){
+ if(!writer)throw new Error('ยังไม่ได้เชื่อมเครื่องพิมพ์');
+ for(let i=0;i<data.length;i+=100){
+  const p=data.slice(i,i+100);
+  if(writer.properties.writeWithoutResponse)await writer.writeValueWithoutResponse(p);else await writer.writeValue(p);
+  await new Promise(r=>setTimeout(r,35));
+ }
+}
+async function sendParts(parts){for(const p of parts)if(p?.length)await writeChunk(p)}
+function encodeCP874(str){
+ const out=[];for(const ch of String(str??'')){const cp=ch.codePointAt(0);
+ if(cp<=0x7f)out.push(cp);else if(cp>=0x0E01&&cp<=0x0E5B)out.push(cp-0x0E00+0xA0);
+ else{const map={0x20AC:0x80,0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,0x2026:0x85};out.push(map[cp]??0x3f)}}return new Uint8Array(out)
+}
+const money=v=>(Number(v)||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+const clean=v=>String(v??'').replace(/[\r\n]+/g,' ').trim();
+function receiptParts(data,cfg){
+ cfg=cfg||data.receipt_config||{};const items=Array.isArray(data.items)?data.items:[];
+ const parts=[INIT,CENTER,BOLD_ON,encodeCP874(clean(cfg.headerName||'POS System')+'\n'),BOLD_OFF];
+ if(cfg.headerLine1)parts.push(encodeCP874(clean(cfg.headerLine1)+'\n'));if(cfg.headerLine2)parts.push(encodeCP874(clean(cfg.headerLine2)+'\n'));if(cfg.phone)parts.push(encodeCP874('โทร: '+clean(cfg.phone)+'\n'));
+ parts.push(encodeCP874('ใบเสร็จรับเงิน\n'),LEFT,encodeCP874('--------------------------------\n'),encodeCP874('เลขที่: '+clean(data.receiptNo||'-')+'\n'),encodeCP874('วันที่: '+clean(data.timestamp||new Date().toLocaleString('th-TH'))+'\n'));
+ items.forEach((it,i)=>{const q=Number(it.qty)||0,p=Number(it.price)||0,t=Number(it.revenue||it.lineTotal)||(q*p);parts.push(encodeCP874(`${i+1}. ${clean(it.name||it.Name||'สินค้า')}\n`),encodeCP874(`   ${q} x ${money(p)} = ${money(t)}\n`))});
+ parts.push(encodeCP874('--------------------------------\n'));const sub=Number(data.sub_total||data.final_amount)||0,disc=Number(data.discount_amount)||0,net=Number(data.final_amount)||0;
+ parts.push(encodeCP874('รวมเป็นเงิน: '+money(sub)+'\n'));if(disc>0)parts.push(encodeCP874('ส่วนลด: -'+money(disc)+'\n'));parts.push(BOLD_ON,encodeCP874('ยอดสุทธิ: '+money(net)+' บาท\n'),BOLD_OFF,encodeCP874('ชำระโดย: '+clean(data.payment_method||'เงินสด')+'\n'));
+ if(Number(data.paid_cash)>0)parts.push(encodeCP874('เงินสด: '+money(data.paid_cash)+'\n'));if(Number(data.paid_transfer)>0)parts.push(encodeCP874('เงินโอน: '+money(data.paid_transfer)+'\n'));if(clean(data.note))parts.push(encodeCP874('หมายเหตุ: '+clean(data.note)+'\n'));
+ parts.push(CENTER,encodeCP874('--------------------------------\n'));if(cfg.footerLine1)parts.push(BOLD_ON,encodeCP874(clean(cfg.footerLine1)+'\n'),BOLD_OFF);if(cfg.footerLine2)parts.push(encodeCP874(clean(cfg.footerLine2)+'\n'));if(data.is_reprint)parts.push(encodeCP874('*** REPRINT / สำเนา ***\n'));parts.push(FEED3);return parts
+}
+async function printReceipt(d,c){await sendParts(receiptParts(d,c))}
+$('#test').onclick=async()=>{try{await sendParts([INIT,CENTER,BOLD_ON,encodeCP874('POS System\n'),BOLD_OFF,encodeCP874('Printer Bridge v3.7.3\nภาษาไทย CP874 พร้อมใช้งาน\n'),FEED3]);log('Test print OK')}catch(e){log('TEST ERROR: '+(e.message||e));alert(e.message||e)}};
+
+async function tryPendingPrint(){
+ if(printing||!pendingJob)return;
+ if(!writer){jstate('มีงานรอพิมพ์ • กรุณาเชื่อมเครื่องพิมพ์','wait');return}
+ printing=true;
+ try{
+  jstate('กำลังพิมพ์...','wait');await printReceipt(pendingJob.receipt||{},pendingJob.receiptConfig||{});
+  log(`PRINT OK: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);jstate('พิมพ์สำเร็จ','good');
+  pendingJob=null;
+  history.replaceState(null,'',location.pathname+location.search);
+  setTimeout(()=>{try{window.close()}catch(_){}},900);
+ }catch(e){log('PRINT ERROR: '+(e.message||e));jstate('พิมพ์ไม่สำเร็จ: '+(e.message||e),'bad')}
+ finally{printing=false}
+}
+async function boot(){
+ pendingJob=decodeJob();
+ if(pendingJob){jstate('รับงานจาก POS แล้ว • กำลังเชื่อมเครื่องพิมพ์','wait');log(`JOB RECEIVED: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`)}
+ const ok=await autoReconnect();
+ if(!ok)pstate(false,'ยังไม่ได้เชื่อมเครื่องพิมพ์');
+ await tryPendingPrint();
+}
+window.addEventListener('hashchange',()=>{pendingJob=decodeJob();if(pendingJob){log(`JOB RECEIVED: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);tryPendingPrint()}});
+boot();
+</script>
+</body>
+</html>
