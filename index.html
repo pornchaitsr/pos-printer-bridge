@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light">
+<title>POS HTTPS Printer Bridge v3.7.2</title>
+<style>
+:root{font-family:"Noto Sans Thai",system-ui,sans-serif;color:#17332e}
+*{box-sizing:border-box}body{margin:0;background:#f2f6f4}.wrap{max-width:680px;margin:auto;padding:16px}
+.card{background:#fff;border:1px solid #d9e5e1;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 5px 18px #0000000a}
+h1{font-size:21px;margin:0 0 4px}.sub{font-size:13px;color:#687872}.status{padding:11px;border-radius:12px;background:#f1f4f3;margin-top:10px;font-size:14px}
+.good{background:#e6f7ee;color:#0f6538}.bad{background:#fff0ec;color:#9b2c1d}
+label{display:block;font-weight:800;font-size:13px;margin:10px 0 5px}
+input{width:100%;padding:12px;border:1px solid #cbd9d4;border-radius:11px;font-size:14px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:10px}
+button{border:0;border-radius:12px;padding:13px 10px;font-weight:800;font-size:14px;cursor:pointer}
+button:disabled{opacity:.45}.primary{background:#075e54;color:#fff}.secondary{background:#e5f2ee;color:#075e54}
+pre{white-space:pre-wrap;word-break:break-word;background:#13211f;color:#d9e8e4;padding:12px;border-radius:12px;min-height:110px;font-size:11px}
+@media(max-width:430px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+ <div class="card">
+  <h1>🖨️ POS HTTPS Printer Bridge</h1>
+  <div class="sub">v3.7.2 • CY-BX58D-CBCF • 58mm • CP874 • BLE/GATT</div>
+  <div id="support" class="status">กำลังตรวจสอบ...</div>
+  <div id="printerStatus" class="status">ยังไม่ได้เชื่อมเครื่องพิมพ์</div>
+  <div id="posStatus" class="status">ยังไม่ได้เปิด POS</div>
+ </div>
+
+ <div class="card">
+  <b>เครื่องพิมพ์</b>
+  <div class="grid">
+   <button id="connect" class="primary">เชื่อม / เปลี่ยนเครื่อง</button>
+   <button id="test" class="secondary" disabled>ทดสอบพิมพ์</button>
+  </div>
+  <div class="sub" style="margin-top:8px">ครั้งแรกกดเชื่อมและเลือก CY-BX58D-CBCF หลังจากนั้น Bridge จะพยายามเชื่อมเครื่องเดิมอัตโนมัติ</div>
+ </div>
+
+ <div class="card">
+  <b>POS System</b>
+  <label>URL ของ POS Web App</label>
+  <input id="posUrl" placeholder="https://script.google.com/macros/s/.../exec">
+  <button id="openPos" class="primary" style="width:100%;margin-top:10px">เปิด POS</button>
+  <div class="sub" style="margin-top:8px">สำหรับ v3.7.2 ให้เปิด POS จากปุ่มนี้ เพื่อสร้างช่องทางสื่อสาร HTTPS Bridge ↔ POS</div>
+ </div>
+
+ <div class="card">
+  <b>งานพิมพ์</b>
+  <div id="jobStatus" class="status">รอรับงานจาก POS</div>
+  <pre id="log"></pre>
+ </div>
+</div>
+<script>
+const PROTOCOL='POS_PRINTER_BRIDGE_V2';
+const $=s=>document.querySelector(s);
+let device=null,server=null,writer=null,posWindow=null,posOrigin='*';
+const bytes=(...a)=>new Uint8Array(a.flat());
+const INIT=bytes(0x1b,0x40),CENTER=bytes(0x1b,0x61,1),LEFT=bytes(0x1b,0x61,0);
+const BOLD_ON=bytes(0x1b,0x45,1),BOLD_OFF=bytes(0x1b,0x45,0),FEED3=bytes(0x1b,0x64,3);
+
+function log(s){$('#log').textContent+=`[${new Date().toLocaleTimeString('th-TH')}] ${s}\n`;$('#log').scrollTop=$('#log').scrollHeight}
+function printerState(ok){$('#test').disabled=!ok;const e=$('#printerStatus');e.textContent=ok?`พร้อมพิมพ์: ${device?.name||'Bluetooth Printer'}`:'ยังไม่ได้เชื่อมเครื่องพิมพ์';e.className='status '+(ok?'good':'')}
+function posState(ok,text){const e=$('#posStatus');e.textContent=text||(ok?'POS ติดต่อกับ Bridge แล้ว':'ยังไม่ได้เปิด POS');e.className='status '+(ok?'good':'')}
+function sendPos(type,extra={}){
+ try{
+  if(!posWindow||posWindow.closed)return false;
+  posWindow.postMessage({protocol:PROTOCOL,type,...extra},posOrigin||'*');
+  return true;
+ }catch(e){log('postMessage ERROR: '+(e.message||e));return false}
+}
+function hello(){sendPos('BRIDGE_HELLO',{connected:!!writer,deviceName:device?.name||'',at:Date.now()})}
+
+$('#support').innerHTML=`HTTPS/Secure Context: <b>${window.isSecureContext?'YES':'NO'}</b> • Web Bluetooth: <b>${navigator.bluetooth?'YES':'NO'}</b>`;
+$('#support').className='status '+(window.isSecureContext&&navigator.bluetooth?'good':'bad');
+log(`Secure=${window.isSecureContext}, Bluetooth=${!!navigator.bluetooth}, origin=${location.origin}`);
+
+async function findWritableCharacteristic(srv){
+ const services=await srv.getPrimaryServices();
+ for(const svc of services){
+  const chars=await svc.getCharacteristics();
+  for(const ch of chars)if(ch.properties.writeWithoutResponse||ch.properties.write)return ch;
+ }
+ throw new Error('ไม่พบ GATT characteristic ที่เขียนได้');
+}
+async function attachDevice(d){
+ device=d;
+ device.addEventListener('gattserverdisconnected',()=>{writer=null;server=null;printerState(false);hello();log('Bluetooth disconnected')});
+ server=await device.gatt.connect();
+ writer=await findWritableCharacteristic(server);
+ printerState(true);hello();log(`Connected: ${device.name||'(no name)'} / ${writer.uuid}`);
+}
+async function choosePrinter(){
+ if(!navigator.bluetooth)throw new Error('Chrome/หน้านี้ไม่มี Web Bluetooth');
+ const d=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[
+ '0000ffe0-0000-1000-8000-00805f9b34fb','0000ff00-0000-1000-8000-00805f9b34fb','000018f0-0000-1000-8000-00805f9b34fb']});
+ await attachDevice(d);
+}
+async function autoReconnect(){
+ if(!navigator.bluetooth?.getDevices)return;
+ try{
+  const ds=await navigator.bluetooth.getDevices();
+  const d=ds.find(x=>x.name==='CY-BX58D-CBCF')||ds[0];
+  if(d){log(`Auto reconnect: ${d.name||'(no name)'}`);await attachDevice(d)}
+ }catch(e){log('Auto reconnect ERROR: '+(e.message||e))}
+}
+$('#connect').onclick=async()=>{try{await choosePrinter()}catch(e){printerState(false);log('CONNECT ERROR: '+(e.message||e));alert(e.message||e)}};
+
+async function writeChunk(data){
+ if(!writer)throw new Error('ยังไม่ได้เชื่อมเครื่องพิมพ์');
+ for(let i=0;i<data.length;i+=100){
+  const p=data.slice(i,i+100);
+  if(writer.properties.writeWithoutResponse)await writer.writeValueWithoutResponse(p);
+  else await writer.writeValue(p);
+  await new Promise(r=>setTimeout(r,35));
+ }
+}
+async function sendParts(parts){for(const p of parts)if(p?.length)await writeChunk(p)}
+function encodeCP874(str){
+ const out=[];
+ for(const ch of String(str??'')){
+  const cp=ch.codePointAt(0);
+  if(cp<=0x7f)out.push(cp);
+  else if(cp>=0x0E01&&cp<=0x0E5B)out.push(cp-0x0E00+0xA0);
+  else{const map={0x20AC:0x80,0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,0x2026:0x85};out.push(map[cp]??0x3f)}
+ }
+ return new Uint8Array(out);
+}
+const money=v=>(Number(v)||0).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2});
+const clean=v=>String(v??'').replace(/[\r\n]+/g,' ').trim();
+
+function receiptParts(data,cfg){
+ cfg=cfg||data.receipt_config||{};
+ const items=Array.isArray(data.items)?data.items:[];
+ const parts=[INIT,CENTER,BOLD_ON,encodeCP874(clean(cfg.headerName||'POS System')+'\n'),BOLD_OFF];
+ if(cfg.headerLine1)parts.push(encodeCP874(clean(cfg.headerLine1)+'\n'));
+ if(cfg.headerLine2)parts.push(encodeCP874(clean(cfg.headerLine2)+'\n'));
+ if(cfg.phone)parts.push(encodeCP874('โทร: '+clean(cfg.phone)+'\n'));
+ parts.push(encodeCP874('ใบเสร็จรับเงิน\n'),LEFT,encodeCP874('--------------------------------\n'));
+ parts.push(encodeCP874('เลขที่: '+clean(data.receiptNo||'-')+'\n'));
+ parts.push(encodeCP874('วันที่: '+clean(data.timestamp||new Date().toLocaleString('th-TH'))+'\n'));
+ items.forEach((it,i)=>{
+  const qty=Number(it.qty)||0,price=Number(it.price)||0,total=Number(it.revenue||it.lineTotal)||(qty*price);
+  parts.push(encodeCP874(`${i+1}. ${clean(it.name||it.Name||'สินค้า')}\n`));
+  parts.push(encodeCP874(`   ${qty} x ${money(price)} = ${money(total)}\n`));
+ });
+ parts.push(encodeCP874('--------------------------------\n'));
+ const sub=Number(data.sub_total||data.final_amount)||0,disc=Number(data.discount_amount)||0,net=Number(data.final_amount)||0;
+ parts.push(encodeCP874('รวมเป็นเงิน: '+money(sub)+'\n'));
+ if(disc>0)parts.push(encodeCP874('ส่วนลด: -'+money(disc)+'\n'));
+ parts.push(BOLD_ON,encodeCP874('ยอดสุทธิ: '+money(net)+' บาท\n'),BOLD_OFF);
+ parts.push(encodeCP874('ชำระโดย: '+clean(data.payment_method||'เงินสด')+'\n'));
+ if(Number(data.paid_cash)>0)parts.push(encodeCP874('เงินสด: '+money(data.paid_cash)+'\n'));
+ if(Number(data.paid_transfer)>0)parts.push(encodeCP874('เงินโอน: '+money(data.paid_transfer)+'\n'));
+ if(clean(data.note))parts.push(encodeCP874('หมายเหตุ: '+clean(data.note)+'\n'));
+ parts.push(CENTER,encodeCP874('--------------------------------\n'));
+ if(cfg.footerLine1)parts.push(BOLD_ON,encodeCP874(clean(cfg.footerLine1)+'\n'),BOLD_OFF);
+ if(cfg.footerLine2)parts.push(encodeCP874(clean(cfg.footerLine2)+'\n'));
+ if(data.is_reprint)parts.push(encodeCP874('*** REPRINT / สำเนา ***\n'));
+ parts.push(FEED3);
+ return parts;
+}
+async function printReceipt(data,cfg){await sendParts(receiptParts(data,cfg))}
+$('#test').onclick=async()=>{try{await sendParts([INIT,CENTER,BOLD_ON,encodeCP874('POS System\n'),BOLD_OFF,encodeCP874('ทดสอบ HTTPS Printer Bridge\nภาษาไทย CP874 พร้อมใช้งาน\n'),FEED3]);log('Test print OK')}catch(e){log('TEST ERROR: '+(e.message||e));alert(e.message||e)}};
+
+$('#posUrl').value=localStorage.getItem('pos_bridge_url')||'';
+$('#openPos').onclick=()=>{
+ const url=$('#posUrl').value.trim();
+ if(!/^https:\/\/script\.google\.com\//i.test(url)&&!/^https:\/\//i.test(url))return alert('กรุณาใส่ HTTPS URL ของ POS Web App');
+ localStorage.setItem('pos_bridge_url',url);
+ posWindow=window.open(url,'POS_SYSTEM_WINDOW');
+ if(!posWindow)return alert('Chrome บล็อก Pop-up กรุณาอนุญาต Pop-up');
+ posOrigin='*'; // Apps Script can redirect between google origins; handshake will tighten this later.
+ posState(false,'เปิด POS แล้ว • กำลังรอ Handshake');
+ log('POS opened from HTTPS Bridge');
+ [600,1400,2800,5000,8000].forEach(ms=>setTimeout(hello,ms));
+};
+
+window.addEventListener('message',async(event)=>{
+ const m=event.data||{};
+ if(m.protocol!==PROTOCOL)return;
+
+ if(m.type==='POS_HELLO_ACK'||m.type==='PING'){
+  if(event.source)posWindow=event.source;
+  if(event.origin&&event.origin!=='null')posOrigin=event.origin;
+  posState(true,'POS ติดต่อกับ Bridge แล้ว');
+  log(`POS handshake OK: ${event.origin||'(unknown origin)'}`);
+  if(m.type==='PING')sendPos('PONG',{connected:!!writer,deviceName:device?.name||''});
+  return;
+ }
+ if(m.type!=='PRINT_RECEIPT')return;
+
+ if(event.source)posWindow=event.source;
+ if(event.origin&&event.origin!=='null')posOrigin=event.origin;
+ posState(true,'POS ติดต่อกับ Bridge แล้ว');
+
+ try{
+  if(!writer)throw new Error('Printer Bridge ยังไม่ได้เชื่อมเครื่องพิมพ์');
+  $('#jobStatus').textContent=`กำลังพิมพ์ ${m.receipt?.receiptNo||''}`;
+  await printReceipt(m.receipt||{},m.receiptConfig||{});
+  $('#jobStatus').textContent=`พิมพ์สำเร็จ ${m.receipt?.receiptNo||''}`;
+  log(`PRINT OK: ${m.receipt?.receiptNo||m.jobId||''}`);
+  sendPos('PRINT_RESULT',{ok:true,jobId:m.jobId,deviceName:device?.name||''});
+ }catch(e){
+  $('#jobStatus').textContent='พิมพ์ไม่สำเร็จ';
+  log('PRINT ERROR: '+(e.message||e));
+  sendPos('PRINT_RESULT',{ok:false,jobId:m.jobId,message:e.message||String(e),deviceName:device?.name||''});
+ }
+});
+autoReconnect();
+</script>
+</body>
+</html>
