@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>POS Printer Bridge v3.7.5</title>
+<title>POS Printer Bridge v3.7.6</title>
 <style>
 :root{font-family:"Noto Sans Thai",system-ui,sans-serif;color:#17332e}
 *{box-sizing:border-box}body{margin:0;background:#f2f6f4}.wrap{max-width:680px;margin:auto;padding:16px}
@@ -139,7 +139,17 @@ async function tryPendingPrint(){
   pendingJob=null;
   history.replaceState(null,'',location.pathname+location.search);
   // v3.7.5: keep the named Bridge tab alive so the next POS sale can reuse it without reopening GitHub manually.
-  setTimeout(()=>jstate('พร้อมรับงานพิมพ์ถัดไป','good'),900);
+  setTimeout(()=>{
+   jstate('พร้อมรับงานพิมพ์ถัดไป','good');
+   try{
+    // Bridge is opened/reused by the POS as a named window. After printing,
+    // hand focus back to its opener (POS) and then close this Bridge tab.
+    if(window.opener && !window.opener.closed){
+     try{ window.opener.focus(); }catch(_){}
+     try{ window.close(); }catch(_){}
+    }
+   }catch(_){}
+  },700);
  }catch(e){
   log('PRINT ERROR: '+(e.message||e));
   jstate('พิมพ์ไม่สำเร็จ: '+(e.message||e),'bad');
