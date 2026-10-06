@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>POS Printer Bridge v3.7.3</title>
+<title>POS Printer Bridge v3.7.5</title>
 <style>
 :root{font-family:"Noto Sans Thai",system-ui,sans-serif;color:#17332e}
 *{box-sizing:border-box}body{margin:0;background:#f2f6f4}.wrap{max-width:680px;margin:auto;padding:16px}
@@ -20,7 +20,7 @@ pre{white-space:pre-wrap;word-break:break-word;background:#13211f;color:#d9e8e4;
 <div class="wrap">
  <div class="card">
   <h1>🖨️ POS Printer Bridge</h1>
-  <div class="sub">v3.7.4 • Auto Print • CY-BX58D-CBCF • CP874</div>
+  <div class="sub">v3.7.5 • Persistent Auto Print • CY-BX58D-CBCF • CP874</div>
   <div id="support" class="status">กำลังตรวจสอบ...</div>
   <div id="printerStatus" class="status">กำลังตรวจเครื่องพิมพ์...</div>
   <div id="jobStatus" class="status">ยังไม่มีงานพิมพ์</div>
@@ -122,7 +122,7 @@ function receiptParts(data,cfg){
  parts.push(CENTER,encodeCP874('--------------------------------\n'));if(cfg.footerLine1)parts.push(BOLD_ON,encodeCP874(clean(cfg.footerLine1)+'\n'),BOLD_OFF);if(cfg.footerLine2)parts.push(encodeCP874(clean(cfg.footerLine2)+'\n'));if(data.is_reprint)parts.push(encodeCP874('*** REPRINT / สำเนา ***\n'));parts.push(FEED3);return parts
 }
 async function printReceipt(d,c){await sendParts(receiptParts(d,c))}
-$('#test').onclick=async()=>{try{await sendParts([INIT,CENTER,BOLD_ON,encodeCP874('POS System\n'),BOLD_OFF,encodeCP874('Printer Bridge v3.7.3\nภาษาไทย CP874 พร้อมใช้งาน\n'),FEED3]);log('Test print OK')}catch(e){log('TEST ERROR: '+(e.message||e));alert(e.message||e)}};
+$('#test').onclick=async()=>{try{await sendParts([INIT,CENTER,BOLD_ON,encodeCP874('POS System\n'),BOLD_OFF,encodeCP874('Printer Bridge v3.7.5\nภาษาไทย CP874 พร้อมใช้งาน\n'),FEED3]);log('Test print OK')}catch(e){log('TEST ERROR: '+(e.message||e));alert(e.message||e)}};
 
 async function tryPendingPrint(){
  if(printing||!pendingJob)return;
@@ -138,7 +138,8 @@ async function tryPendingPrint(){
   log(`PRINT OK: ${pendingJob.receipt?.receiptNo||pendingJob.jobId||''}`);jstate('พิมพ์สำเร็จ','good');
   pendingJob=null;
   history.replaceState(null,'',location.pathname+location.search);
-  setTimeout(()=>{try{window.close()}catch(_){}},900);
+  // v3.7.5: keep the named Bridge tab alive so the next POS sale can reuse it without reopening GitHub manually.
+  setTimeout(()=>jstate('พร้อมรับงานพิมพ์ถัดไป','good'),900);
  }catch(e){
   log('PRINT ERROR: '+(e.message||e));
   jstate('พิมพ์ไม่สำเร็จ: '+(e.message||e),'bad');
